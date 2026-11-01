@@ -21,3 +21,13 @@ class Signal(BaseModel):
     @property
     def target_position(self) -> int:
         return {"long": self.qty, "short": -self.qty, "flat": 0}[self.action]
+
+
+class ManualOrder(BaseModel):
+    """Order placed by a person/agent (MCP) rather than a TradingView alert."""
+
+    action: Literal["long", "short", "flat"]
+    qty: int = Field(1, ge=1)
+    stop: Optional[float] = None
+    target: Optional[float] = None
+    price: Optional[float] = Field(None, description="Reference price (paper broker fills here)")

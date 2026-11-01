@@ -32,6 +32,31 @@ class Executor:
         log.info("signal %s %s -> %s", sig.action, sig.signal_id, result)
         return result
 
+    def preview(self, sig: Signal) -> dict:
+        """What `handle` would do right now, without placing orders or changing state."""
+        contract = self.contract()
+        current = self.broker.position(contract)
+        target = sig.target_position
+        plan = {"contract": contract, "current_position": current, "target_position": target}
+        if sig.symbol.upper() not in self.s.allowed_symbols:
+            return {**plan, "would": "reject", "reason": f"symbol {sig.symbol} not allowed"}
+        if target == 0:
+            return {**plan, "would": "flatten" if current else "nothing (already flat)"}
+        if current != 0 and (current > 0) == (target > 0):
+            return {**plan, "would": f"nothing (already {sig.action})"}
+        pnl = self.broker.daily_pnl()
+        reason = self.risk.entry_block_reason(sig, pnl)
+        steps = (["flatten existing position"] if current else [])
+        if reason:
+            return {**plan, "would": " then ".join(steps) or "reject", "entry_blocked": reason,
+                    "daily_pnl": pnl}
+        steps.append(f"market {'buy' if target > 0 else 'sell'} {abs(target)} {contract}"
+                     + (f", stop {sig.stop}" if sig.stop is not None else "")
+                     + (f", target {sig.target}" if sig.target is not None else ""))
+        return {**plan, "would": " then ".join(steps), "daily_pnl": pnl,
+                "entries_today": self.risk.entries_today,
+                "max_trades_per_day": self.s.max_trades_per_day}
+
     def _handle(self, sig: Signal) -> dict:
         if sig.symbol.upper() not in self.s.allowed_symbols:
             return {"status": "rejected", "reason": f"symbol {sig.symbol} not allowed"}

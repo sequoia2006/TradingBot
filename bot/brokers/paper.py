@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from .base import Broker
+from .base import Broker, BrokerError
 
 log = logging.getLogger(__name__)
 POINT_VALUE = {"MNQ": 2.0, "NQ": 20.0, "MES": 5.0, "ES": 50.0}
@@ -47,6 +47,8 @@ class PaperBroker(Broker):
             self._fill(contract, -cur, price)
 
     def enter(self, contract, qty, stop, target, price=None) -> dict:
+        if price is None:
+            raise BrokerError("paper broker needs a price to simulate a fill")
         self._fill(contract, qty, price)
         return {"paper": True, "qty": qty, "price": price, "stop": stop, "target": target}
 

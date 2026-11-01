@@ -4,6 +4,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -12,7 +13,7 @@ from pydantic import ValidationError
 from .brokers import Broker, BrokerError, PaperBroker
 from .config import Settings
 from .executor import Executor
-from .models import Signal
+from .models import ManualOrder, Signal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -61,6 +62,22 @@ def create_app(settings: Optional[Settings] = None, broker: Optional[Broker] = N
             log.exception("broker error")
             raise HTTPException(502, str(e))
 
+    @app.post("/order")
+    def manual_order(order: ManualOrder, dry_run: bool = False,
+                     x_admin_token: Optional[str] = Header(None)):
+        """Manual order (used by the MCP server). Same risk gate as webhook signals."""
+        require_admin(x_admin_token)
+        sig = Signal(secret="", symbol="MNQ", sent_at=None,
+                     signal_id=None if dry_run else f"manual-{uuid.uuid4()}",
+                     **order.model_dump())
+        if dry_run:
+            return {"dry_run": True, **ex.preview(sig)}
+        try:
+            return ex.handle(sig)
+        except BrokerError as e:
+            log.exception("broker error")
+            raise HTTPException(502, str(e))
+
     @app.get("/status")
     def status(x_admin_token: Optional[str] = Header(None)):
         require_admin(x_admin_token)
@@ -77,7 +94,8 @@ def create_app(settings: Optional[Settings] = None, broker: Optional[Broker] = N
         require_admin(x_admin_token)
         ex.risk.kill("manual kill switch")
         if flatten:
-            ex.broker.flatten(ex.contract())
+            with ex._lock:
+                ex.broker.flatten(ex.contract())
         return {"killed": True, "flattened": flatten}
 
     @app.post("/resume")

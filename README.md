@@ -22,6 +22,7 @@ TradingView can't place futures orders on its own from a strategy. The usual app
 | `bot/risk.py` | Risk gate: kill switch, max contracts, entry time window, no weekends, max trades/day, daily loss limit (trips the kill switch), stale-signal rejection, stop-side sanity check, duplicate signal IDs. **Exits are never blocked.** |
 | `bot/brokers/paper.py` | In-memory paper broker (the default). |
 | `bot/brokers/tradovate.py` | Tradovate REST broker: market entry plus broker-side OCO stop/target bracket (`placeOSO`), liquidate, and cancelling leftover bracket orders. |
+| `mcp_server/server.py` | MCP server so Claude can check status and place orders through the bot (see §6). |
 | `bot/contracts.py` | Picks the front-month contract automatically (e.g. `MNQZ6`) and rolls 8 days before expiry. |
 
 ## 1. Backtest in TradingView
@@ -37,7 +38,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # set WEBHOOK_SECRET and ADMIN_TOKEN at minimum
 uvicorn bot.app:app --host 0.0.0.0 --port 8000 --env-file .env
-pytest -q                   # 17 tests, no network needed
+pytest -q                   # 22 tests, no network needed
 ```
 
 Simulate a signal:
@@ -81,6 +82,45 @@ Example payload the strategy sends:
 5. Run it on demo for a while. Compare its fills against the TradingView Strategy Tester before you switch `TRADOVATE_ENV=live`.
 
 The Tradovate adapter is tested against a mocked API that follows Tradovate's documented endpoints. **Check its behaviour on demo before trusting it.**
+
+## 6. Let Claude trade through MCP (optional)
+
+`mcp_server/` is an MCP server that gives Claude these tools. It only talks to **your bot's API**, never to the broker directly, so every order still passes the same risk rules.
+
+| Tool | Places orders? | What it does |
+|---|---|---|
+| `get_status` | no | Contract, position, today's P&L, entries today, kill switch, recent activity |
+| `preview_order` | no | Dry run: what an order would do and whether a risk rule would block it |
+| `place_order` | **yes** | Go `long`/`short` `qty` contracts, or `flat`, with an optional broker-side stop/target |
+| `close_position` | **yes** | Flatten and cancel the bracket orders |
+| `kill_switch` | **yes** | Block all new entries and flatten |
+| `resume_trading` | no | Clear the kill switch |
+
+Its built-in instructions tell Claude to preview first and only place an order after you approve it. The real safeguard is your MCP client's permission prompt: **never "always allow" `place_order`, `close_position` or `kill_switch`.** Auto-allowing the read-only tools is fine.
+
+**Claude Code:**
+```bash
+claude mcp add mnq-bot -e BOT_URL=https://your-bot -e BOT_ADMIN_TOKEN=<ADMIN_TOKEN> \
+  -- python -m mcp_server.server     # run from this repo, with requirements installed
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "mnq-bot": {
+      "command": "/path/to/TradingBot/.venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/path/to/TradingBot",
+      "env": { "BOT_URL": "https://your-bot", "BOT_ADMIN_TOKEN": "<ADMIN_TOKEN>" }
+    }
+  }
+}
+```
+
+Pair it with a read-only TradingView chart MCP server (for example [claude-tradingview-mcp](https://glama.ai/mcp/servers/RVAflo/claude-tradingview-mcp)). Claude can then read your MNQ chart and propose a trade, and you approve it through `place_order`.
+
+Notes: manual orders count toward `MAX_TRADES_PER_DAY` and follow the entry window. In paper mode, pass `price` because the paper broker fills there. Keep `ADMIN_TOKEN` secret: anyone who has it can trade your account.
 
 ## Operating it
 
