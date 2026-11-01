@@ -1,0 +1,83 @@
+//@version=6
+// MNQ Trend Bot — EMA cross + VWAP filter, ATR bracket, RTH-only, EOD flatten.
+// Every order event sends a JSON webhook (via {{strategy.order.alert_message}})
+// telling the server the *desired position*: long / short / flat.
+strategy("MNQ Trend Bot", overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,
+     slippage = 1, pyramiding = 0, calc_on_every_tick = false)
+
+// ───────── Inputs ─────────
+fastLen   = input.int(9,    "Fast EMA",            minval = 1, group = "Signal")
+slowLen   = input.int(21,   "Slow EMA",            minval = 2, group = "Signal")
+useVwap   = input.bool(true, "Require VWAP alignment",          group = "Signal")
+atrLen    = input.int(14,   "ATR length",          minval = 1, group = "Risk")
+stopMult  = input.float(1.5, "Stop = ATR ×",       minval = 0.1, step = 0.1, group = "Risk")
+rr        = input.float(2.0, "Target = Stop ×",    minval = 0.1, step = 0.1, group = "Risk")
+qty       = input.int(1,    "Contracts",           minval = 1, group = "Risk")
+maxTrades = input.int(4,    "Max entries per day", minval = 1, group = "Risk")
+entrySess = input.session("0935-1545", "Entry window (New York time)", group = "Session")
+flatSess  = input.session("1550-1600", "Force-flat window (New York time)", group = "Session")
+secret    = input.string("change-me", "Webhook secret", group = "Webhook")
+
+// ───────── Indicators ─────────
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+vwap = ta.vwap(hlc3)
+atr  = ta.atr(atrLen)
+
+inEntry = not na(time(timeframe.period, entrySess, "America/New_York"))
+inFlat  = not na(time(timeframe.period, flatSess,  "America/New_York"))
+
+var int entriesToday = 0
+if timeframe.change("1D")
+    entriesToday := 0
+
+longSig  = ta.crossover(fast, slow)  and (not useVwap or close > vwap)
+shortSig = ta.crossunder(fast, slow) and (not useVwap or close < vwap)
+canEnter = inEntry and entriesToday < maxTrades
+
+// ───────── Webhook payload ─────────
+fmtPx(float p) => na(p) ? "null" : str.tostring(p, format.mintick)
+
+msg(string action, float stopPx, float tgtPx) =>
+    '{"secret":"' + secret + '"' +
+     ',"action":"' + action + '"' +
+     ',"symbol":"' + syminfo.root + '"' +
+     ',"qty":' + str.tostring(qty) +
+     ',"price":' + fmtPx(close) +
+     ',"stop":' + fmtPx(stopPx) +
+     ',"target":' + fmtPx(tgtPx) +
+     ',"signal_id":"' + str.tostring(time) + '-' + action + '"' +
+     ',"sent_at":' + str.tostring(timenow) + '}'
+
+// ───────── Orders ─────────
+var float stopLvl = na
+var float tgtLvl  = na
+
+if canEnter and longSig and strategy.position_size <= 0
+    stopLvl := close - atr * stopMult
+    tgtLvl  := close + atr * stopMult * rr
+    strategy.entry("Long", strategy.long, qty, alert_message = msg("long", stopLvl, tgtLvl))
+    entriesToday += 1
+
+if canEnter and shortSig and strategy.position_size >= 0
+    stopLvl := close + atr * stopMult
+    tgtLvl  := close - atr * stopMult * rr
+    strategy.entry("Short", strategy.short, qty, alert_message = msg("short", stopLvl, tgtLvl))
+    entriesToday += 1
+
+strategy.exit("Long Exit",  "Long",  stop = stopLvl, limit = tgtLvl, alert_message = msg("flat", na, na))
+strategy.exit("Short Exit", "Short", stop = stopLvl, limit = tgtLvl, alert_message = msg("flat", na, na))
+
+if inFlat and strategy.position_size != 0
+    strategy.close_all(comment = "EOD", alert_message = msg("flat", na, na))
+
+// ───────── Visuals ─────────
+plot(fast, "Fast EMA", color.new(color.teal, 0))
+plot(slow, "Slow EMA", color.new(color.orange, 0))
+plot(vwap, "VWAP",     color.new(color.purple, 30), 2)
+plot(strategy.position_size != 0 ? stopLvl : na, "Stop",   color.red,   style = plot.style_linebr)
+plot(strategy.position_size != 0 ? tgtLvl  : na, "Target", color.green, style = plot.style_linebr)
+bgcolor(inEntry ? color.new(color.blue, 94) : na, title = "Entry window")
